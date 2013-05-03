@@ -3,18 +3,18 @@
 ;; copyright (C) 2012, 2013 David Vazquez
 ;; Copyright (C) 2012 Raimon Grau
 
-;; This program is free software: you can redistribute it and/or
+;; JSCL is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
 ;; published by the Free Software Foundation, either version 3 of the
 ;; License, or (at your option) any later version.
 ;;
-;; This program is distributed in the hope that it will be useful, but
+;; JSCL is distributed in the hope that it will be useful, but
 ;; WITHOUT ANY WARRANTY; without even the implied warranty of
 ;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 ;; General Public License for more details.
 ;;
 ;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; along with JSCL.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;;; Compiler
 
@@ -30,7 +30,7 @@
                  ((integerp arg) (integer-to-string arg))
                  ((floatp arg) (float-to-string arg))
                  ((stringp arg) arg)
-                 (t (error "Unknown argument."))))
+                 (t (error "Unknown argument `~S'." arg))))
              args))
 
 ;;; Wrap X with a Javascript code to convert the result from
@@ -102,7 +102,7 @@
                       ((and (listp sd) (car sd) (cddr sd))
                        sd)
                       (t
-                       (error "Bad slot accessor."))))
+                       (error "Bad slot description `~S'." sd))))
                   slots))
          (predicate (intern (concat name-string "-P"))))
     `(progn
@@ -124,7 +124,7 @@
                 (collect
                     `(defun ,accessor-name (x)
                        (unless (,predicate x)
-                         (error ,(concat "The object is not a type " name-string)))
+                         (error "The object `~S' is not of type `~S'" x ,name-string))
                        (nth ,index x)))
                 ;; TODO: Implement this with a higher level
                 ;; abstraction like defsetf or (defun (setf ..))
@@ -291,7 +291,7 @@
 (defun ll-rest-argument (ll)
   (let ((rest (ll-section '&rest ll)))
     (when (cdr rest)
-      (error "Bad lambda-list"))
+      (error "Bad lambda-list `~S'." ll))
     (car rest)))
 
 (defun ll-keyword-arguments-canonical (ll)
@@ -332,32 +332,25 @@
     (n-required-arguments n-optional-arguments rest-p)
   ;; Note: Remember that we assume that the number of arguments of a
   ;; call is at least 1 (the values argument).
-  (let ((min (1+ n-required-arguments))
-        (max (if rest-p 'n/a (+ 1 n-required-arguments n-optional-arguments))))
+  (let ((min n-required-arguments)
+        (max (if rest-p 'n/a (+ n-required-arguments n-optional-arguments))))
     (block nil
       ;; Special case: a positive exact number of arguments.
-      (when (and (< 1 min) (eql min max))
-        (return (code "checkArgs(arguments, " min ");" *newline*)))
+      (when (and (< 0 min) (eql min max))
+        (return (code "checkArgs(nargs, " min ");" *newline*)))
       ;; General case:
       (code
-       (when (< 1 min)
-         (code "checkArgsAtLeast(arguments, " min ");" *newline*))
+       (when (< 0 min)
+         (code "checkArgsAtLeast(nargs, " min ");" *newline*))
        (when (numberp max)
-         (code "checkArgsAtMost(arguments, " max ");" *newline*))))))
+         (code "checkArgsAtMost(nargs, " max ");" *newline*))))))
 
 (defun compile-lambda-optional (ll)
   (let* ((optional-arguments (ll-optional-arguments-canonical ll))
 	 (n-required-arguments (length (ll-required-arguments ll)))
 	 (n-optional-arguments (length optional-arguments)))
     (when optional-arguments
-      (code (mapconcat (lambda (arg)
-                         (code "var " (translate-variable (first arg)) "; " *newline*
-                               (when (third arg)
-                                 (code "var " (translate-variable (third arg))
-                                       " = " (ls-compile t)
-                                       "; " *newline*))))
-                       optional-arguments)
-            "switch(arguments.length-1){" *newline*
+      (code "switch(nargs){" *newline*
             (let ((cases nil)
                   (idx 0))
               (progn
@@ -385,11 +378,9 @@
     (when rest-argument
       (let ((js!rest (translate-variable rest-argument)))
         (code "var " js!rest "= " (ls-compile nil) ";" *newline*
-              "for (var i = arguments.length-1; i>="
-              (+ 1 n-required-arguments n-optional-arguments)
+              "for (var i = nargs-1; i>=" (+ n-required-arguments n-optional-arguments)
               "; i--)" *newline*
-              (indent js!rest " = {car: arguments[i], cdr: ") js!rest "};"
-              *newline*)))))
+              (indent js!rest " = {car: arguments[i+2], cdr: " js!rest "};" *newline*))))))
 
 (defun compile-lambda-parse-keywords (ll)
   (let ((n-required-arguments
@@ -411,12 +402,12 @@
      ;; Parse keywords
      (flet ((parse-keyword (keyarg)
 	      ;; ((keyword-name var) init-form)
-	      (code "for (i=" (+ 1 n-required-arguments n-optional-arguments)
-                    "; i<arguments.length; i+=2){" *newline*
+	      (code "for (i=" (+ n-required-arguments n-optional-arguments)
+                    "; i<nargs; i+=2){" *newline*
                     (indent
-                     "if (arguments[i] === " (ls-compile (caar keyarg)) "){" *newline*
+                     "if (arguments[i+2] === " (ls-compile (caar keyarg)) "){" *newline*
                      (indent (translate-variable (cadr (car keyarg)))
-                             " = arguments[i+1];"
+                             " = arguments[i+3];"
                              *newline*
                              (let ((svar (third keyarg)))
                                (when svar
@@ -425,7 +416,7 @@
                      "}" *newline*)
                     "}" *newline*
                     ;; Default value
-                    "if (i == arguments.length){" *newline*
+                    "if (i == nargs){" *newline*
                     (indent (translate-variable (cadr (car keyarg))) " = " (ls-compile (cadr keyarg)) ";" *newline*)
                     "}" *newline*)))
        (when keyword-arguments
@@ -433,11 +424,11 @@
                (mapconcat #'parse-keyword keyword-arguments))))
      ;; Check for unknown keywords
      (when keyword-arguments
-       (code "for (i=" (+ 1 n-required-arguments n-optional-arguments)
-             "; i<arguments.length; i+=2){" *newline*
+       (code "for (i=" (+ n-required-arguments n-optional-arguments)
+             "; i<nargs; i+=2){" *newline*
              (indent "if ("
                      (join (mapcar (lambda (x)
-                                     (concat "arguments[i] !== " (ls-compile (caar x))))
+                                     (concat "arguments[i+2] !== " (ls-compile (caar x))))
                                    keyword-arguments)
                            " && ")
                      ")" *newline*
@@ -496,9 +487,10 @@
                                     (ll-svars ll)))))
         (lambda-name/docstring-wrapper name documentation
          "(function ("
-         (join (cons "values"
-                     (mapcar #'translate-variable
-                             (append required-arguments optional-arguments)))
+         (join (list* "values"
+                      "nargs"
+                      (mapcar #'translate-variable
+                              (append required-arguments optional-arguments)))
                ",")
          "){" *newline*
          (indent
@@ -536,7 +528,7 @@
       (cond
 	((null pairs) (return))
 	((null (cdr pairs))
-	 (error "Odd paris in SETQ"))
+	 (error "Odd pairs in SETQ"))
 	(t
 	 (concatf result
 	   (concat (setq-pair (car pairs) (cadr pairs))
@@ -599,6 +591,7 @@
   (cond
     ((integerp sexp) (integer-to-string sexp))
     ((floatp sexp) (float-to-string sexp))
+    ((characterp sexp) (code "\"" (escape-string (string sexp)) "\""))
     ((stringp sexp) (code "\"" (escape-string sexp) "\""))
     (t
      (or (cdr (assoc sexp *literal-table*))
@@ -655,8 +648,11 @@
 
 (define-compilation flet (definitions &rest body)
   (let* ((fnames (mapcar #'car definitions))
-         (fbody  (mapcar #'cdr definitions))
-         (cfuncs (mapcar #'compile-function-definition fbody))
+         (cfuncs (mapcar (lambda (def)
+                           (compile-lambda (cadr def)
+                                           `((block ,(car def)
+                                               ,@(cddr def)))))
+                         definitions))
          (*environment*
           (extend-lexenv (mapcar #'make-function-binding fnames)
                          *environment*
@@ -677,7 +673,8 @@
     (js!selfcall
       (mapconcat (lambda (func)
 		   (code "var " (translate-function (car func))
-                         " = " (compile-lambda (cadr func) (cddr func))
+                         " = " (compile-lambda (cadr func)
+                                               `((block ,(car func) ,@(cddr func))))
                          ";" *newline*))
 		 definitions)
       (ls-compile-block body t))))
@@ -799,11 +796,15 @@
         (let*-binding-wrapper specials body)))))
 
 
-(defvar *block-counter* 0)
-
 (define-compilation block (name &rest body)
-  (let* ((tr (incf *block-counter*))
-         (b (make-binding :name name :type 'block :value tr)))
+  ;; We use Javascript exceptions to implement non local control
+  ;; transfer. Exceptions has dynamic scoping, so we use a uniquely
+  ;; generated object to identify the block. The instance of a empty
+  ;; array is used to distinguish between nested dynamic Javascript
+  ;; exceptions. See https://github.com/davazp/jscl/issues/64 for
+  ;; futher details.
+  (let* ((idvar (gvarname name))
+         (b (make-binding :name name :type 'block :value idvar)))
     (when *multiple-value-p*
       (push 'multiple-value (binding-declarations b)))
     (let* ((*environment* (extend-lexenv (list b) *environment* 'block))
@@ -811,10 +812,11 @@
       (if (member 'used (binding-declarations b))
           (js!selfcall
             "try {" *newline*
+            "var " idvar " = [];" *newline*
             (indent cbody)
             "}" *newline*
             "catch (cf){" *newline*
-            "    if (cf.type == 'block' && cf.id == " tr ")" *newline*
+            "    if (cf.type == 'block' && cf.id == " idvar ")" *newline*
             (if *multiple-value-p*
                 "        return values.apply(this, forcemv(cf.values));"
                 "        return cf.values;")
@@ -828,8 +830,12 @@
   (let* ((b (lookup-in-lexenv name *environment* 'block))
          (multiple-value-p (member 'multiple-value (binding-declarations b))))
     (when (null b)
-      (error (concat "Unknown block `" (symbol-name name) "'.")))
+      (error "Return from unknown block `~S'." (symbol-name name)))
     (push 'used (binding-declarations b))
+    ;; The binding value is the name of a variable, whose value is the
+    ;; unique identifier of the block as exception. We can't use the
+    ;; variable name itself, because it could not to be unique, so we
+    ;; capture it in a closure.
     (js!selfcall
       (when multiple-value-p (code "var values = mv;" *newline*))
       "throw ({"
@@ -865,19 +871,16 @@
     "message: 'Throw uncatched.'"
     "})"))
 
-
-(defvar *tagbody-counter* 0)
-(defvar *go-tag-counter* 0)
-
 (defun go-tag-p (x)
   (or (integerp x) (symbolp x)))
 
 (defun declare-tagbody-tags (tbidx body)
-  (let ((bindings
-         (mapcar (lambda (label)
-                   (let ((tagidx (integer-to-string (incf *go-tag-counter*))))
-                     (make-binding :name label :type 'gotag :value (list tbidx tagidx))))
-                 (remove-if-not #'go-tag-p body))))
+  (let* ((go-tag-counter 0)
+         (bindings
+          (mapcar (lambda (label)
+                    (let ((tagidx (integer-to-string (incf go-tag-counter))))
+                      (make-binding :name label :type 'gotag :value (list tbidx tagidx))))
+                  (remove-if-not #'go-tag-p body))))
     (extend-lexenv bindings *environment* 'gotag)))
 
 (define-compilation tagbody (&rest body)
@@ -890,18 +893,21 @@
   (unless (go-tag-p (car body))
     (push (gensym "START") body))
   ;; Tagbody compilation
-  (let ((tbidx *tagbody-counter*))
+  (let ((branch (gvarname 'branch))
+        (tbidx (gvarname 'tbidx)))
     (let ((*environment* (declare-tagbody-tags tbidx body))
           initag)
       (let ((b (lookup-in-lexenv (first body) *environment* 'gotag)))
         (setq initag (second (binding-value b))))
       (js!selfcall
-        "var tagbody_" tbidx " = " initag ";" *newline*
+        ;; TAGBODY branch to take
+        "var " branch " = " initag ";" *newline*
+        "var " tbidx " = [];" *newline*
         "tbloop:" *newline*
         "while (true) {" *newline*
         (indent "try {" *newline*
                 (indent (let ((content ""))
-                          (code "switch(tagbody_" tbidx "){" *newline*
+                          (code "switch(" branch "){" *newline*
                                 "case " initag ":" *newline*
                                 (dolist (form (cdr body) content)
                                   (concatf content
@@ -915,7 +921,7 @@
                 "}" *newline*
                 "catch (jump) {" *newline*
                 "    if (jump.type == 'tagbody' && jump.id == " tbidx ")" *newline*
-                "        tagbody_" tbidx " = jump.label;" *newline*
+                "        " branch " = jump.label;" *newline*
                 "    else" *newline*
                 "        throw(jump);" *newline*
                 "}" *newline*)
@@ -928,7 +934,7 @@
              ((symbolp label) (symbol-name label))
              ((integerp label) (integer-to-string label)))))
     (when (null b)
-      (error (concat "Unknown tag `" n "'.")))
+      (error "Unknown tag `~S'" label))
     (js!selfcall
       "throw ({"
       "type: 'tagbody', "
@@ -950,7 +956,7 @@
 (define-compilation multiple-value-call (func-form &rest forms)
   (js!selfcall
     "var func = " (ls-compile func-form) ";" *newline*
-    "var args = [" (if *multiple-value-p* "values" "pv") "];" *newline*
+    "var args = [" (if *multiple-value-p* "values" "pv") ", 0];" *newline*
     "return "
     (js!selfcall
       "var values = mv;" *newline*
@@ -962,6 +968,7 @@
                          "else" *newline*
                          (indent "args.push(vs);" *newline*)))
                  forms)
+      "args[1] = args.length-2;" *newline*
       "return func.apply(window, args);" *newline*) ";" *newline*))
 
 (define-compilation multiple-value-prog1 (first-form &rest forms)
@@ -981,7 +988,7 @@
 (define-setf-expander %js-vref (var)
   (let ((new-value (gensym)))
     (unless (stringp var)
-      (error "a string was expected"))
+      (error "`~S' is not a string." var))
     (values nil
             (list var)
             (list new-value)
@@ -1064,8 +1071,7 @@
          (bq-process (bq-completely-process (cadr x))))
         ((eq (car x) *comma*) (cadr x))
         ((eq (car x) *comma-atsign*)
-         ;; (error ",@~S after `" (cadr x))
-         (error "ill-formed"))
+         (error ",@~S after `" (cadr x)))
         ;; ((eq (car x) *comma-dot*)
         ;;  ;; (error ",.~S after `" (cadr x))
         ;;  (error "ill-formed"))
@@ -1076,13 +1082,11 @@
                       (nreconc q (list (list *bq-quote* p)))))
              (when (eq (car p) *comma*)
                (unless (null (cddr p))
-                 ;; (error "Malformed ,~S" p)
-                 (error "Malformed"))
+                 (error "Malformed ,~S" p))
                (return (cons *bq-append*
                              (nreconc q (list (cadr p))))))
              (when (eq (car p) *comma-atsign*)
-               ;; (error "Dotted ,@~S" p)
-               (error "Dotted"))
+               (error "Dotted ,@~S" p))
              ;; (when (eq (car p) *comma-dot*)
              ;;   ;; (error "Dotted ,.~S" p)
              ;;   (error "Dotted"))
@@ -1303,7 +1307,7 @@
 
 (defmacro variable-arity (args &body body)
   (unless (symbolp args)
-    (error "Bad usage of VARIABLE-ARITY, you must pass a symbol"))
+    (error "`~S' is not a symbol." args))
   `(variable-arity-call ,args
                         (lambda (,args)
                           (code "return " ,@body ";" *newline*))))
@@ -1453,11 +1457,26 @@
 (define-builtin lambda-code (x)
   (code "(" x ").toString()"))
 
-(define-builtin eq    (x y) (js!bool (code "(" x " === " y ")")))
+(define-builtin eq (x y)
+  (js!bool (code "(" x " === " y ")")))
 
-(define-builtin char-to-string (x)
+(define-builtin char-code (x)
+  (type-check (("x" "string" x))
+    "x.charCodeAt(0)"))
+
+(define-builtin code-char (x)
   (type-check (("x" "number" x))
     "String.fromCharCode(x)"))
+
+(define-builtin characterp (x)
+  (js!bool
+   (js!selfcall
+     "var x = " x ";" *newline*
+     "return (typeof(" x ") == \"string\") && x.length == 1;")))
+
+(define-builtin char-to-string (x)
+  (type-check (("x" "string" x))
+    "(x)"))
 
 (define-builtin stringp (x)
   (js!bool (code "(typeof(" x ") == \"string\")")))
@@ -1481,7 +1500,7 @@
 (define-builtin char (string index)
   (type-check (("string" "string" string)
                ("index" "number" index))
-    "string.charCodeAt(index)"))
+    "string.charAt(index)"))
 
 (define-builtin concat-two (string1 string2)
   (type-check (("string1" "string" string1)
@@ -1492,8 +1511,9 @@
   (js!selfcall
     "var f = " (ls-compile func) ";" *newline*
     "return (typeof f === 'function'? f: f.fvalue)("
-    (join (cons (if *multiple-value-p* "values" "pv")
-                (mapcar #'ls-compile args))
+    (join (list* (if *multiple-value-p* "values" "pv")
+                 (integer-to-string (length args))
+                 (mapcar #'ls-compile args))
           ", ")
     ")"))
 
@@ -1504,13 +1524,15 @@
             (last (car (last args))))
         (js!selfcall
           "var f = " (ls-compile func) ";" *newline*
-          "var args = [" (join (cons (if *multiple-value-p* "values" "pv")
-                                     (mapcar #'ls-compile args))
+          "var args = [" (join (list* (if *multiple-value-p* "values" "pv")
+                                      (integer-to-string (length args))
+                                      (mapcar #'ls-compile args))
                                ", ")
           "];" *newline*
           "var tail = (" (ls-compile last) ");" *newline*
           "while (tail != " (ls-compile nil) "){" *newline*
           "    args.push(tail.car);" *newline*
+          "    args[1] += 1;" *newline*
           "    tail = tail.cdr;" *newline*
           "}" *newline*
           "return (typeof f === 'function'? f : f.fvalue).apply(this, args);" *newline*))))
@@ -1520,14 +1542,10 @@
     (if *multiple-value-p*
         (js!selfcall
           "var v = globalEval(string);" *newline*
-          "if (typeof v !== 'object' || !('multiple-value' in v)){" *newline*
-          (indent "v = [v];" *newline*
-                  "v['multiple-value'] = true;" *newline*)
-          "}" *newline*
-          "return values.apply(this, v);" *newline*)
+          "return values.apply(this, forcemv(v));" *newline*)
         "globalEval(string)")))
 
-(define-builtin error (string)
+(define-builtin %throw (string)
   (js!selfcall "throw " string ";" *newline*))
 
 (define-builtin new () "{}")
@@ -1643,11 +1661,13 @@
 
 (defun compile-funcall (function args)
   (let* ((values-funcs (if *multiple-value-p* "values" "pv"))
-         (arglist (concat "(" (join (cons values-funcs (mapcar #'ls-compile args)) ", ") ")")))
+         (arglist (concat "(" (join (list* values-funcs
+                                           (integer-to-string (length args))
+                                           (mapcar #'ls-compile args)) ", ") ")")))
     (unless (or (symbolp function)
                 (and (consp function)
                      (eq (car function) 'lambda)))
-      (error "Bad function"))
+      (error "Bad function designator `~S'" function))
     (cond
       ((translate-function function)
        (concat (translate-function function) arglist))
@@ -1685,6 +1705,7 @@
               (ls-compile `(symbol-value ',sexp))))))
         ((integerp sexp) (integer-to-string sexp))
         ((floatp sexp) (float-to-string sexp))
+        ((characterp sexp) (code "\"" (escape-string (string sexp)) "\""))
         ((stringp sexp) (code "\"" (escape-string sexp) "\""))
         ((arrayp sexp) (literal sexp))
         ((listp sexp)
@@ -1703,7 +1724,7 @@
              (t
               (compile-funcall name args)))))
         (t
-         (error (concat "How should I compile " (prin1-to-string sexp) "?")))))))
+         (error "How should I compile `~S'?" sexp))))))
 
 
 (defvar *compile-print-toplevels* nil)
