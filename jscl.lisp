@@ -16,17 +16,29 @@
 ;; You should have received a copy of the GNU General Public License
 ;; along with JSCL.  If not, see <http://www.gnu.org/licenses/>.
 
+(defpackage :jscl
+  (:use :cl)
+  (:export #:bootstrap #:run-tests-in-host))
+
+(in-package :jscl)
+
 (defvar *source*
-  '(("boot"      :target)
-    ("compat"    :host)
-    ("utils"     :both)
-    ("list"      :target)
-    ("print"     :target)
-    ("package"   :target)
-    ("read"      :both)
-    ("compiler"  :both)
-    ("streams"   :target)
-    ("toplevel"  :target)))
+  '(("boot"             :target)
+    ("compat"           :host)
+    ("utils"            :both)
+    ("list"             :target)
+    ("string"           :target)
+    ("sequence"         :target)
+    ("print"            :target)
+    ("package"          :target)
+    ("ffi"              :target)
+    ("misc"             :target)
+    ("streams"          :target)
+    ("read"             :both)
+    ("defstruct"        :both)
+    ("lambda-list"      :both)
+    ("compiler"         :both)
+    ("toplevel"         :target)))
 
 (defun source-pathname
     (filename &key (directory '(:relative "src")) (type nil) (defaults filename))

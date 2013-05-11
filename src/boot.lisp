@@ -23,18 +23,17 @@
 ;;; to the compiler to be able to run.
 
 (eval-when-compile
-  (%compile-defmacro 'defmacro
-                     '(function
-                       (lambda (name args &rest body)
-                        `(eval-when-compile
-                           (%compile-defmacro ',name
-                                              '(function
-                                                (lambda ,(mapcar #'(lambda (x)
-                                                                     (if (eq x '&body)
-                                                                         '&rest
-                                                                         x))
-                                                                 args)
-                                                 ,@body))))))))
+  (let ((defmacro-macroexpander
+         '#'(lambda (form)
+              (destructuring-bind (name args &body body)
+                  form
+                (let ((whole (gensym)))
+                  `(eval-when-compile
+                     (%compile-defmacro ',name
+                                        '#'(lambda (,whole)
+                                             (destructuring-bind ,args ,whole
+                                               ,@body)))))))))
+    (%compile-defmacro 'defmacro defmacro-macroexpander)))
 
 (defmacro declaim (&rest decls)
   `(eval-when-compile
@@ -61,10 +60,10 @@
 (defmacro unless (condition &body body)
   `(if ,condition nil (progn ,@body)))
 
-(defmacro defvar (name value &optional docstring)
+(defmacro defvar (name &optional (value nil value-p) docstring)
   `(progn
      (declaim (special ,name))
-     (unless (boundp ',name) (setq ,name ,value))
+     ,@(when value-p `((unless (boundp ',name) (setq ,name ,value))))
      ,@(when (stringp docstring) `((oset ',name "vardoc" ,docstring)))
      ',name))
 
@@ -92,6 +91,9 @@
 
 (defun boundp (x)
   (boundp x))
+
+(defun fboundp (x)
+  (fboundp x))
 
 ;; Basic functions
 (defun = (x y) (= x y))
@@ -140,54 +142,59 @@
               ,@(cdr newval))
          ,setter))))
 
-(defmacro dolist (iter &body body)
-  (let ((var (first iter))
-        (g!list (gensym)))
+(defmacro dolist ((var list &optional result) &body body)
+  (let ((g!list (gensym)))
+    (unless (symbolp var) (error "`~S' is not a symbol." var))
     `(block nil
-       (let ((,g!list ,(second iter))
+       (let ((,g!list ,list)
              (,var nil))
          (%while ,g!list
                  (setq ,var (car ,g!list))
                  (tagbody ,@body)
                  (setq ,g!list (cdr ,g!list)))
-         ,(third iter)))))
+         ,result))))
 
-(defmacro dotimes (iter &body body)
-  (let ((g!to (gensym))
-        (var (first iter))
-        (to (second iter))
-        (result (third iter)))
+(defmacro dotimes ((var count &optional result) &body body)
+  (let ((g!count (gensym)))
+    (unless (symbolp var) (error "`~S' is not a symbol." var))
     `(block nil
        (let ((,var 0)
-             (,g!to ,to))
-         (%while (< ,var ,g!to)
+             (,g!count ,count))
+         (%while (< ,var ,g!count)
                  (tagbody ,@body)
                  (incf ,var))
          ,result))))
 
 (defmacro cond (&rest clausules)
-  (if (null clausules)
-    nil
-    (if (eq (caar clausules) t)
-      `(progn ,@(cdar clausules))
-      (let ((test-symbol (gensym)))
-        `(let ((,test-symbol ,(caar clausules)))
-           (if ,test-symbol
-             ,(if (null (cdar clausules))
-                test-symbol
-                `(progn ,@(cdar clausules)))
-             (cond ,@(cdr clausules))))))))
+  (unless (null clausules)
+    (destructuring-bind (condition &body body)
+        (first clausules)
+      (cond
+        ((eq condition t)
+         `(progn ,@body))
+        ((null body)
+         (let ((test-symbol (gensym)))
+           `(let ((,test-symbol ,condition))
+              (if ,test-symbol
+                  ,test-symbol
+                  (cond ,@(rest clausules))))))
+        (t
+         `(if ,condition
+              (progn ,@body)
+              (cond ,@(rest clausules))))))))
 
 (defmacro case (form &rest clausules)
   (let ((!form (gensym)))
     `(let ((,!form ,form))
        (cond
          ,@(mapcar (lambda (clausule)
-                     (if (or (eq (car clausule) t)
-                             (eq (car clausule) 'otherwise))
-                         `(t ,@(cdr clausule))
-                         `((eql ,!form ',(car clausule))
-                           ,@(cdr clausule))))
+                     (destructuring-bind (keys &body body)
+                         clausule
+                       (if (or (eq keys 't) (eq keys 'otherwise))
+                           `(t nil ,@body)
+                           (let ((keys (if (listp keys) keys (list keys))))
+                             `((or ,@(mapcar (lambda (key) `(eql ,!form ',key)) keys))
+                               nil ,@body)))))
                    clausules)))))
 
 (defmacro ecase (form &rest clausules)
@@ -230,6 +237,12 @@
 (defmacro prog2 (form1 result &body body)
   `(prog1 (progn ,form1 ,result) ,@body))
 
+(defmacro prog (inits &rest body )
+  (multiple-value-bind (forms decls docstring) (parse-body body)
+    `(block nil
+       (let ,inits
+         ,@decls
+         (tagbody ,@forms)))))
 
 
 ;;; Go on growing the Lisp language in Ecmalisp, with more high level
@@ -254,7 +267,7 @@
             (append (cdr list1) list2))))
 
 (defun append (&rest lists)
-  (!reduce #'append-two lists))
+  (!reduce #'append-two lists nil))
 
 (defun revappend (list1 list2)
   (while list1
@@ -282,7 +295,7 @@
     (setq assignments (reverse assignments))
     ;;
     `(let ,(mapcar #'cdr assignments)
-       (setq ,@(!reduce #'append (mapcar #'butlast assignments))))))
+       (setq ,@(!reduce #'append (mapcar #'butlast assignments) nil)))))
 
 (defmacro do (varlist endlist &body body)
   `(block nil
@@ -374,38 +387,9 @@
 (defun atom (x)
   (not (consp x)))
 
-(defun find (item list &key key (test #'eql))
-  (dolist (x list)
-    (when (funcall test (funcall key x) item)
-      (return x))))
-
-(defun remove (x list)
-  (cond
-    ((null list)
-     nil)
-    ((eql x (car list))
-     (remove x (cdr list)))
-    (t
-     (cons (car list) (remove x (cdr list))))))
-
-(defun remove-if (func list)
-  (cond
-    ((null list)
-     nil)
-    ((funcall func (car list))
-     (remove-if func (cdr list)))
-    (t
-     ;;
-     (cons (car list) (remove-if func (cdr list))))))
-
-(defun remove-if-not (func list)
-  (cond
-    ((null list)
-     nil)
-    ((funcall func (car list))
-     (cons (car list) (remove-if-not func (cdr list))))
-    (t
-     (remove-if-not func (cdr list)))))
+(defun alpha-char-p (x)
+  (or (<= (char-code #\a) (char-code x) (char-code #\z))
+      (<= (char-code #\A) (char-code x) (char-code #\Z))))
 
 (defun digit-char-p (x)
   (if (and (<= (char-code #\0) (char-code x) (char-code #\9)))
@@ -416,58 +400,6 @@
   (and (<= 0 weight 9)
        (char "0123456789" weight)))
 
-(defun subseq (seq a &optional b)
-  (cond
-    ((stringp seq)
-     (if b
-         (slice seq a b)
-         (slice seq a)))
-    (t
-     (error "Unsupported argument."))))
-
-(defmacro do-sequence (iteration &body body)
-  (let ((seq (gensym))
-        (index (gensym)))
-    `(let ((,seq ,(second iteration)))
-       (cond
-         ;; Strings
-         ((stringp ,seq)
-          (let ((,index 0))
-            (dotimes (,index (length ,seq))
-              (let ((,(first iteration)
-                     (char ,seq ,index)))
-                ,@body))))
-         ;; Lists
-         ((listp ,seq)
-          (dolist (,(first iteration) ,seq)
-            ,@body))
-         (t
-          (error "type-error!"))))))
-
-(defun some (function seq)
-  (do-sequence (elt seq)
-    (when (funcall function elt)
-      (return-from some t))))
-
-(defun every (function seq)
-  (do-sequence (elt seq)
-    (unless (funcall function elt)
-      (return-from every nil)))
-  t)
-
-(defun position (elt sequence)
-  (let ((pos 0))
-    (do-sequence (x seq)
-      (when (eq elt x)
-        (return))
-      (incf pos))
-    pos))
-
-(defun string (x)
-  (cond ((stringp x) x)
-        ((symbolp x) (symbol-name x))
-        (t (char-to-string x))))
-
 (defun equal (x y)
   (cond
     ((eql x y) t)
@@ -475,18 +407,9 @@
      (and (consp y)
           (equal (car x) (car y))
           (equal (cdr x) (cdr y))))
-    ((arrayp x)
-     (and (arrayp y)
-          (let ((n (length x)))
-            (when (= (length y) n)
-              (dotimes (i n)
-                (unless (equal (aref x i) (aref y i))
-                  (return-from equal nil)))
-              t))))
+    ((stringp x)
+     (and (stringp y) (string= x y)))
     (t nil)))
-
-(defun string= (s1 s2)
-  (equal s1 s2))
 
 (defun fdefinition (x)
   (cond
@@ -533,7 +456,7 @@
                 `(,value)
                 `(setq ,place ,value)
                 place))
-      (let ((place (ls-macroexpand-1 place)))
+      (let ((place (!macroexpand-1 place)))
         (let* ((access-fn (car place))
                (expander (cdr (assoc access-fn *setf-expanders*))))
           (when (null expander)
@@ -554,7 +477,7 @@
     ((null (cdr pairs))
      (error "Odd number of arguments to setf."))
     ((null (cddr pairs))
-     (let ((place (ls-macroexpand-1 (first pairs)))
+     (let ((place (!macroexpand-1 (first pairs)))
            (value (second pairs)))
        (multiple-value-bind (vars vals store-vars writer-form)
            (get-setf-expansion place)
@@ -592,9 +515,15 @@
                                  (list nil)))))
                    clausules)))))
 
+(defmacro etypecase (x &rest clausules)
+  (let ((g!x (gensym)))
+    `(let ((,g!x ,x))
+       (typecase ,g!x
+         ,@clausules
+         (t (error "~X fell through etypeacase expression." ,g!x))))))
+
 (defun notany (fn seq)
   (not (some fn seq)))
-
 
 (defconstant internal-time-units-per-second 1000) 
 
@@ -608,7 +537,7 @@
   (+ (get-unix-time) 2208988800))
 
 (defun concat (&rest strs)
-  (!reduce #'concat-two strs :initial-value ""))
+  (!reduce #'concat-two strs ""))
 
 (defun values-list (list)
   (values-array (list-to-vector list)))
